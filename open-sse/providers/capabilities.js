@@ -96,6 +96,9 @@ export const MODEL_CAPABILITIES = {
 
   // GLM vision variant (text GLM has no vision)
   "glm-4.6v":          { vision: true, reasoning: true, thinkingFormat: "zai", contextWindow: 128000 },
+  // GLM-5.3: 1M context, 128K output, reasoning always on (cannot be disabled).
+  // Needs an exact entry — the "*glm-5*" pattern below would cap it at 200k.
+  "glm-5.3":           { reasoning: true, thinkingFormat: "zai", thinkingCanDisable: false, contextWindow: 1000000, maxOutput: 128000 },
 
   // Qwen plain coder/text (no vision) — registry "vision-model" / "coder-model" aliases
   "vision-model":      { vision: true, reasoning: true, thinkingFormat: "qwen", contextWindow: 1000000 },
