@@ -14,6 +14,7 @@ services:
       PORT: "20128"
       HOSTNAME: "0.0.0.0"
       NODE_ENV: production
+      TZ: Asia/Bangkok
       HEADROOM_URL: http://headroom:8787
     depends_on:
       - headroom
