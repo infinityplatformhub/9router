@@ -73,26 +73,111 @@ function textFromContent(content) {
 function isAgentTextRequest(body) {
   // Many compatible clients always attach their built-in tool schemas, even
   // for a normal text turn. Cursor's retired ChatService rejects those
-  // requests; AgentService can still answer the text turn, so ignore schemas
-  // here. A real tool-call/result conversation is kept on the legacy path
-  // until its AgentService tool protocol is implemented.
-  return Array.isArray(body?.messages) && body.messages.every((message) => {
-    if (message?.tool_calls?.length || message?.role === "tool") return false;
+  // requests, so everything it can answer is routed to AgentService.
+  //
+  // Tool calls and tool results in the history are folded into the transcript
+  // as text by encodeHistoryMessage. That is lossy — the model reads what ran
+  // instead of receiving structured tool turns — but the legacy alternative
+  // is not a working path at all: ChatService answers 429 "Update Required"
+  // for every request (decolua/9router#2487). Text-with-context beats a hard
+  // failure until AgentService's own tool protocol is implemented.
+  //
+  // ponytail: no structured tool turns on AgentService. Upgrade to real
+  // ExecServerMessage/ExecClientMessage round-trips (schema in
+  // docs/CURSOR_AGENT_PROTO.md) when a tool-executing client is wired up.
+  if (!Array.isArray(body?.messages)) return false;
+  return body.messages.every((message) => {
+    if (message?.role === "tool" || message?.tool_calls?.length) return true;
     return typeof message?.content === "string"
       || Array.isArray(message?.content) && message.content.every((part) => part?.type === "text");
   });
 }
 
-function encodeHistoryMessage(message) {
+// AgentService's ConversationHistory models tool turns natively — see
+// docs/CURSOR_AGENT_PROTO.md, extracted from the shipped Cursor bundle:
+//
+//   ConversationHistory            1=messages[]
+//   ConversationHistoryMessage     1=user 2=assistant 3=tool
+//   …UserMessage                   1=content[]  (1=text 2=image)
+//   …AssistantMessage              1=content[]  (1=text 2=reasoning 4=tool_call)
+//   …ToolCall                      1=tool_call_id 2=tool_name 3=args_json
+//   …ToolMessage                   1=tool_call_id 2=tool_name 3=content[] 4=is_error
+//
+// Encoding tool turns structurally (rather than flattening them to prose, or
+// bouncing the request to the retired ChatService that answers 429 "Update
+// Required") is what lets a coding client hold a real conversation here.
+const historyText = (value) => agentMessage(1, agentString(1, value));
+
+function encodeUserHistory(message) {
   const content = textFromContent(message?.content);
   if (!content) return null;
+  return agentMessage(1, agentMessage(1, historyText(content)));
+}
 
-  // ConversationHistoryMessage.user / .assistant -> repeated content -> text.
-  const text = agentString(1, content);
-  if (message.role === "assistant") {
-    return agentMessage(2, agentMessage(1, agentMessage(1, text)));
+function encodeAssistantHistory(message) {
+  const parts = [];
+  const content = textFromContent(message?.content);
+  if (content) parts.push(agentMessage(1, historyText(content)));
+
+  for (const call of message?.tool_calls || []) {
+    const id = call?.id || call?.tool_call_id;
+    const name = call?.function?.name || call?.name;
+    if (!id || !name) continue;
+    const rawArgs = call?.function?.arguments ?? call?.arguments;
+    const argsJson = typeof rawArgs === "string" ? rawArgs : JSON.stringify(rawArgs ?? {});
+    // ConversationHistoryAssistantContent.tool_call
+    parts.push(agentMessage(4, concatBuffers(
+      agentString(1, id),
+      agentString(2, name),
+      agentString(3, argsJson),
+    )));
   }
-  return agentMessage(1, agentMessage(1, agentMessage(1, text)));
+
+  if (!parts.length) return null;
+  return agentMessage(2, concatBuffers(...parts.map((part) => agentMessage(1, part))));
+}
+
+function encodeToolHistory(message) {
+  const id = message?.tool_call_id;
+  if (!id) return null;
+  const content = textFromContent(message?.content)
+    || (typeof message?.content === "string" ? message.content : "");
+  // ConversationHistoryToolMessage.content is a repeated content block whose
+  // text variant matches the user/assistant one.
+  const fields = [agentString(1, id)];
+  if (message?.name) fields.push(agentString(2, message.name));
+  if (content) fields.push(agentMessage(3, historyText(content)));
+  if (message?.is_error) fields.push(agentBool(4, true));
+  return agentMessage(3, concatBuffers(...fields));
+}
+
+// prepend_user_messages carries agent.v1.UserMessage {1=text, 2=message_id}.
+// Every prior turn — including tool calls and their results — is rendered into
+// that text, tagged with its speaker so the model can read the transcript back.
+function encodeHistoryMessage(message) {
+  const role = message?.role;
+  let text = textFromContent(message?.content);
+
+  if (role === "tool") {
+    const id = message?.tool_call_id ? ` ${message.tool_call_id}` : "";
+    text = text ? `[tool result${id}]\n${text}` : "";
+  } else if (role === "assistant") {
+    const calls = (message?.tool_calls || [])
+      .map((call) => {
+        const name = call?.function?.name || call?.name || "tool";
+        const args = call?.function?.arguments ?? call?.arguments;
+        const rendered = typeof args === "string" ? args : args ? JSON.stringify(args) : "";
+        return `[called ${name}${rendered ? `(${rendered})` : ""}]`;
+      })
+      .join("\n");
+    text = [text, calls].filter(Boolean).join("\n");
+    if (text) text = `Assistant: ${text}`;
+  } else if (text) {
+    text = `User: ${text}`;
+  }
+
+  if (!text) return null;
+  return concatBuffers(agentString(1, text), agentString(2, crypto.randomUUID()));
 }
 
 function buildAgentRunFrame(messages, model) {
@@ -115,12 +200,20 @@ function buildAgentRunFrame(messages, model) {
     agentString(1, userText),
     agentString(2, crypto.randomUUID()),
   );
+  // UserMessageAction.conversation_history holds a ConversationHistory whose
+  // field 1 is the repeated message list, so each tagged
+  // ConversationHistoryMessage from encodeHistoryMessage goes under field 1.
   const conversationHistory = history.length
     ? concatBuffers(...history.map((entry) => agentMessage(1, entry)))
     : null;
+  // UserMessageAction.prepend_user_messages is a repeated UserMessage that the
+  // server replays ahead of the current turn. conversation_history (field 7)
+  // is accepted but ignored for a fresh conversation_state, so the transcript
+  // is carried here instead — verified against the live endpoint.
+  const prepended = history.map((entry) => agentMessage(4, entry));
   const userAction = concatBuffers(
     agentMessage(1, userMessage),
-    ...(conversationHistory ? [agentMessage(7, conversationHistory)] : []),
+    ...prepended,
   );
   const conversationAction = agentMessage(1, userAction);
   const requestedModel = concatBuffers(agentString(1, model), agentBool(7, true));
