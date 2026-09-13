@@ -5,7 +5,7 @@ import {
   refreshProviderCredentials,
   shouldRefreshCredentials,
 } from "../services/oauthCredentialManager.js";
-import { normalizeResponsesInput } from "../translator/formats/responsesApi.js";
+import { normalizeResponsesInput, normalizeResponsesToolParameters } from "../translator/formats/responsesApi.js";
 import { fetchImageAsBase64 } from "../translator/concerns/image.js";
 import { getModelUpstreamId } from "../config/providerModels.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
@@ -94,9 +94,12 @@ function normalizeCodexTools(body) {
     const name = rawName.trim();
     if (!name) return false;
     const description = typeof tool.description === "string" ? tool.description : (typeof fn?.description === "string" ? fn.description : "");
-    const parameters = (tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters))
+    const rawParameters = (tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters))
       ? tool.parameters
-      : (fn?.parameters && typeof fn.parameters === "object" && !Array.isArray(fn.parameters) ? fn.parameters : { type: "object", properties: {} });
+      : (fn?.parameters && typeof fn.parameters === "object" && !Array.isArray(fn.parameters) ? fn.parameters : null);
+    // Native Responses clients skip the translator, so sanitize here too — Codex compiles
+    // `pattern` with RE2 and 400s on lookahead/\p{…} (Claude Code's Artifact tool).
+    const parameters = normalizeResponsesToolParameters(rawParameters);
     for (const k of Object.keys(tool)) delete tool[k];
     tool.type = "function";
     tool.name = name.slice(0, 128);

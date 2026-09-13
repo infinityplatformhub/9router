@@ -11,6 +11,7 @@ import {
   clampResponsesCallId,
   coerceResponsesArguments,
   coerceResponsesOutput,
+  normalizeResponsesToolParameters,
 } from "../formats/responsesApi.js";
 import { ROLE, OPENAI_BLOCK, RESPONSES_ITEM } from "../schema/index.js";
 
@@ -222,7 +223,7 @@ export function openaiResponsesToOpenAIRequest(model, body, stream, credentials)
           function: {
             name,
             description: String(tool.description || ""),
-            parameters: normalizeToolParameters(tool.parameters),
+            parameters: normalizeResponsesToolParameters(tool.parameters),
             strict: tool.strict
           }
         };
@@ -267,15 +268,6 @@ function extractInstructionsText(content) {
     }).filter(Boolean).join("\n");
   }
   return "";
-}
-
-/**
- * Ensure object schema always has properties field (required by Codex Responses API)
- */
-function normalizeToolParameters(params) {
-  if (!params) return { type: "object", properties: {} };
-  if (params.type === "object" && !params.properties) return { ...params, properties: {} };
-  return params;
 }
 
 /**
@@ -436,7 +428,7 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
           type: OPENAI_BLOCK.FUNCTION,
           name: name.slice(0, MAX_TOOL_NAME_LEN),
           description: String(tool.function.description || ""),
-          parameters: normalizeToolParameters(tool.function.parameters),
+          parameters: normalizeResponsesToolParameters(tool.function.parameters),
           strict: tool.function.strict
         };
       }

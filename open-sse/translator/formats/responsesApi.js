@@ -76,6 +76,48 @@ export function coerceResponsesOutput(value) {
   }
 }
 
+// JSON Schema keywords the Responses tool validator rejects outright (#3667).
+const UNSUPPORTED_SCHEMA_KEYS = new Set(["$schema", "propertyNames", "patternProperties"]);
+
+// `pattern` is compiled with RE2, which has no lookahead/lookbehind, no backreferences,
+// and no \p{…} unicode classes. Claude Code's Artifact tool ships all of these, so an
+// otherwise-valid schema 400s with "Invalid schema for function 'Artifact'".
+const RE2_UNSUPPORTED_REGEX = /\(\?[=!]|\(\?<[=!]|\\[pP]\{|\\[1-9]/;
+
+/**
+ * Strip JSON Schema constructs the Responses tool validator can't compile.
+ * Structure and every portable keyword are preserved — only the offending
+ * keyword is dropped, so the tool still declares its real shape upstream.
+ * @param {*} node - schema fragment (recursed into objects and arrays)
+ * @returns {*} a new fragment with unsupported keywords removed
+ */
+export function stripUnsupportedToolSchema(node) {
+  if (Array.isArray(node)) return node.map(stripUnsupportedToolSchema);
+  if (!node || typeof node !== "object") return node;
+  const out = {};
+  for (const [key, value] of Object.entries(node)) {
+    if (UNSUPPORTED_SCHEMA_KEYS.has(key)) continue;
+    if (key === "pattern" && typeof value === "string" && RE2_UNSUPPORTED_REGEX.test(value)) continue;
+    out[key] = stripUnsupportedToolSchema(value);
+  }
+  return out;
+}
+
+/**
+ * Ensure object schemas always carry `properties` (required by Codex Responses)
+ * and drop keywords the upstream validator rejects.
+ * @param {object} params - raw tool parameters / input_schema
+ * @returns {object} sanitized parameters, safe to send to a Responses upstream
+ */
+export function normalizeResponsesToolParameters(params) {
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    return { type: "object", properties: {} };
+  }
+  const clean = stripUnsupportedToolSchema(params);
+  if (clean.type === "object" && !clean.properties) clean.properties = {};
+  return clean;
+}
+
 /**
  * Convert OpenAI Responses API format to standard chat completions format
  * Responses API uses: { input: [...], instructions: "..." }
