@@ -82,7 +82,7 @@ const UNSUPPORTED_SCHEMA_KEYS = new Set(["$schema", "propertyNames", "patternPro
 // `pattern` is compiled with RE2, which has no lookahead/lookbehind, no backreferences,
 // and no \p{…} unicode classes. Claude Code's Artifact tool ships all of these, so an
 // otherwise-valid schema 400s with "Invalid schema for function 'Artifact'".
-const RE2_UNSUPPORTED_REGEX = /\(\?[=!]|\(\?<[=!]|\\[pP]\{|\\[1-9]/;
+const RE2_UNSUPPORTED_REGEX = /(^|[^\\])(\\\\)*(?:\(\?[=!]|\(\?<[=!]|\\[pP]\{|\\[1-9])/;
 
 /**
  * Strip JSON Schema constructs the Responses tool validator can't compile.
@@ -92,15 +92,30 @@ const RE2_UNSUPPORTED_REGEX = /\(\?[=!]|\(\?<[=!]|\\[pP]\{|\\[1-9]/;
  * @returns {*} a new fragment with unsupported keywords removed
  */
 export function stripUnsupportedToolSchema(node) {
-  if (Array.isArray(node)) return node.map(stripUnsupportedToolSchema);
+  if (Array.isArray(node)) {
+    const out = node.map(stripUnsupportedToolSchema);
+    return out.every((value, i) => value === node[i]) ? node : out;
+  }
   if (!node || typeof node !== "object") return node;
   const out = {};
+  let changed = false;
   for (const [key, value] of Object.entries(node)) {
-    if (UNSUPPORTED_SCHEMA_KEYS.has(key)) continue;
-    if (key === "pattern" && typeof value === "string" && RE2_UNSUPPORTED_REGEX.test(value)) continue;
-    out[key] = stripUnsupportedToolSchema(value);
+    if (UNSUPPORTED_SCHEMA_KEYS.has(key) ||
+        (key === "pattern" && typeof value === "string" && RE2_UNSUPPORTED_REGEX.test(value))) {
+      changed = true;
+      continue;
+    }
+    // Property names are user data, including names such as "pattern".
+    if (key === "properties" && value && typeof value === "object" && !Array.isArray(value)) {
+      const props = Object.fromEntries(Object.entries(value).map(([name, schema]) =>
+        [name, stripUnsupportedToolSchema(schema)]));
+      out[key] = Object.keys(props).every(name => props[name] === value[name]) ? value : props;
+    } else {
+      out[key] = stripUnsupportedToolSchema(value);
+    }
+    if (out[key] !== value) changed = true;
   }
-  return out;
+  return changed ? out : node;
 }
 
 /**
@@ -114,7 +129,7 @@ export function normalizeResponsesToolParameters(params) {
     return { type: "object", properties: {} };
   }
   const clean = stripUnsupportedToolSchema(params);
-  if (clean.type === "object" && !clean.properties) clean.properties = {};
+  if (clean.type === "object" && !clean.properties) return { ...clean, properties: {} };
   return clean;
 }
 
