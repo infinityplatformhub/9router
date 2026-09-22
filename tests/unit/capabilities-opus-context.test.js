@@ -18,6 +18,7 @@ describe("Claude Opus 1M context capabilities", () => {
 
   for (const model of [
     "claude-opus-5",
+    "claude-opus-5-5",
     "claude-opus-5-thinking",
     "claude-opus-5-agentic",
     "claude-opus-5-thinking-agentic",
