@@ -246,6 +246,15 @@ describe("Cursor AgentService executor helpers (cursor.js)", () => {
       const run = decodeMessage(clientMsg.get(1)[0].value);
       expect(run.has(2)).toBe(true); // action
       expect(run.has(9)).toBe(true); // requested_model
+      // custom_system_prompt (field 8) makes AgentService return an empty turn.
+      expect(run.has(8)).toBe(false);
+      expect(run.has(3)).toBe(true); // ModelDetails — required for thinking variants
+      const action = decodeMessage(run.get(2)[0].value);
+      const userAction = decodeMessage(action.get(1)[0].value);
+      const userMessage = decodeMessage(userAction.get(1)[0].value);
+      const userText = Buffer.from(userMessage.get(1)[0].value).toString("utf8");
+      expect(userText).toContain("be brief");
+      expect(userText).toContain("hi");
     });
 
     it("encodes mcp_tools (field 4) when tools are provided", () => {
@@ -263,7 +272,7 @@ describe("Cursor AgentService executor helpers (cursor.js)", () => {
       expect(run.has(4)).toBe(false);
     });
 
-    it("encodes conversation_history from prior turns including tool calls/results", () => {
+    it("replays prior user, assistant tool call, and tool result via prepend_user_messages", () => {
       const messages = [
         { role: "user", content: "weather in Tokyo?" },
         { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "get_weather", arguments: '{"city":"Tokyo"}' } }] },
@@ -274,9 +283,16 @@ describe("Cursor AgentService executor helpers (cursor.js)", () => {
       const run = decodeMessage(decodeMessage(frame).get(1)[0].value);
       const action = decodeMessage(run.get(2)[0].value);
       const userAction = decodeMessage(action.get(1)[0].value);
-      expect(userAction.has(7)).toBe(true); // conversation_history (field 7)
-      const history = decodeMessage(userAction.get(7)[0].value);
-      expect(history.get(1).length).toBeGreaterThanOrEqual(2); // prior turns
+      // Fresh AgentService sessions ignore conversation_history (field 7).
+      // Preserve the locally verified replay path while adding upstream MCP tools.
+      const history = userAction.get(4).map((entry) => decodeMessage(entry.value));
+      const text = history.map((entry) => Buffer.from(entry.get(1)[0].value).toString("utf8"));
+      expect(text).toEqual([
+        "User: weather in Tokyo?",
+        'Assistant: [called get_weather({"city":"Tokyo"})]',
+        "[tool result c1]\n18C cloudy",
+      ]);
+      expect(history.every((entry) => entry.has(2))).toBe(true); // message IDs
     });
   });
 });
