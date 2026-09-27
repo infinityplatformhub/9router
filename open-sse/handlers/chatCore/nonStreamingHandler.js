@@ -12,6 +12,7 @@ import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { restoreToolNames } from "../../utils/opencodeFingerprint.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
+import { withAnthropicResponseHeaders } from "../../utils/anthropicResponseHeaders.js";
 
 function parseToolArguments(value) {
   if (!value) return {};
@@ -399,7 +400,11 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   return {
     success: true,
     response: new Response(JSON.stringify(restoreToolNames(translatedResponse, toolNameMap)), {
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      headers: withAnthropicResponseHeaders(
+        { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        providerResponse.headers,
+        provider
+      )
     })
   };
 }
