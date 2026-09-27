@@ -69,6 +69,11 @@ export class DefaultExecutor extends BaseExecutor {
   }
 
   transformRequest(model, body) {
+    // The server-side auto-mode classifier binds its checks to the original
+    // request. Leave safeguard-bearing Claude requests untouched.
+    if (body?.safeguards !== undefined && (this.provider === "claude" || this.provider === "anthropic")) {
+      return body;
+    }
     const transformed = this.applyJsonSchemaFallback(body);
 
     if (transformed && typeof transformed === "object") {
@@ -179,6 +184,26 @@ export class DefaultExecutor extends BaseExecutor {
       if (token.includes("sk-ant-oat")) {
         const sid = extractClaudeSessionIdFromUserId(body?.metadata?.user_id);
         if (sid) headers["x-claude-code-session-id"] = sid;
+      }
+    }
+
+    // Claude Code sends feature flags as an open list. Keep its exact values when
+    // the request goes directly to Anthropic; replacing them with our static
+    // list prevents newer features (including server-side auto-mode checks)
+    // from reaching the API. Do not send unknown flags to other upstreams.
+    const upstreamUrl = url || ((this.provider === "claude" || this.provider === "anthropic")
+      ? "https://api.anthropic.com/v1/messages"
+      : null);
+    let directAnthropic = false;
+    try { directAnthropic = new URL(upstreamUrl).hostname === "api.anthropic.com"; } catch { /* no URL */ }
+    if (directAnthropic) {
+      for (const name of ["anthropic-beta", "anthropic-version"]) {
+        const value = credentials?.rawHeaders?.[name];
+        if (typeof value !== "string" || !value) continue;
+        for (const key of Object.keys(headers)) {
+          if (key.toLowerCase() === name) delete headers[key];
+        }
+        headers[name] = value;
       }
     }
 

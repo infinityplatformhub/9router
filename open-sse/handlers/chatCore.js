@@ -102,10 +102,12 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   if (useTransport && credentials) credentials.runtimeTransport = useTransport;
   const stripList = getModelStrip(alias, model);
   const upstreamModel = getModelUpstreamId(alias, model);
+  const preserveSafeguards = sourceFormat === FORMATS.CLAUDE && body.safeguards !== undefined
+    && (provider === "claude" || provider === "anthropic") && targetFormat === FORMATS.CLAUDE;
 
   // Inject provider-level thinking config override (only if client hasn't set)
   // on/off → extended type (body.thinking), none/low/medium/high → effort type (body.reasoning_effort)
-  if (providerThinking?.mode && providerThinking.mode !== "auto") {
+  if (!preserveSafeguards && providerThinking?.mode && providerThinking.mode !== "auto") {
     const mode = providerThinking.mode;
     if (mode === "on" && !body.thinking) {
       console.log("Injecting provider-level thinking config override: on");
@@ -118,7 +120,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   // Per-request opt-out: client can bypass all token savers via header
-  const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
+  const tokenSaverEnabled = !preserveSafeguards && clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";
 
   // Cursor's translator rewrites tool_result into user text, so RTK must run on
   // the source body before translation. Every other pair translates the tool
@@ -201,7 +203,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       }
     }
     // Normalize newer Cowork/CC beta shapes (adaptive thinking, mid-conversation system) the API rejects
-    if (clientTool === "claude") normalizeClaudePassthrough(translatedBody, translatedBody.model);
+    if (clientTool === "claude" && !preserveSafeguards) normalizeClaudePassthrough(translatedBody, translatedBody.model);
   } else {
     translatedBody = translateRequest(sourceFormat, targetFormat, upstreamModel, body, stream, credentials, provider, reqLogger, stripList, connectionId, clientTool);
     if (!translatedBody) {
@@ -217,7 +219,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   }
 
   // Dedupe duplicate built-in tools when equivalent MCP tools are present (Claude clients only).
-  if (clientTool === "claude" && Array.isArray(translatedBody.tools)) {
+  if (clientTool === "claude" && !preserveSafeguards && Array.isArray(translatedBody.tools)) {
     const { tools: deduped, stripped } = dedupeTools(translatedBody.tools);
     if (stripped.length > 0) {
       translatedBody.tools = deduped;
@@ -300,7 +302,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // PXPIPE: image bulky context (Claude-format bodies only), last saver before dispatch
   let pxpipeSummary = null;
-  if (pxpipeEnabled) {
+  if (pxpipeEnabled && !preserveSafeguards) {
     const pxpipeResult = await compressWithPxpipe(translatedBody, {
       enabled: true, format: finalFormat, model: upstreamModel,
       minChars: pxpipeMinChars, timeoutMs: pxpipeTimeoutMs, transform: pxpipeTransform,
@@ -315,7 +317,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Pin cache breakpoints to the final body — every saver above can reshape
   // system/tools/messages, and a stale anchor costs a full prefix rewrite.
-  if (passthrough && clientTool === "claude") anchorClaudeCache(translatedBody);
+  if (passthrough && clientTool === "claude" && !preserveSafeguards) anchorClaudeCache(translatedBody);
 
   const executor = getExecutor(provider);
   trackPendingRequest(model, provider, connectionId, true);
@@ -487,7 +489,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       log.errorLine(reqTag, "✗", `ERROR ${statusCode} · ${provider}/${model} · ${Date.now() - requestStartTime}ms${urlStr}\n    ${errMsg}`);
     }
     reqLogger.logError(new Error(message), finalBody || translatedBody);
-    return createErrorResult(statusCode, errMsg, resetsAtMs, upstreamResponseHeaders(providerResponse.headers));
+return createErrorResult(statusCode, errMsg, resetsAtMs, upstreamResponseHeaders(providerResponse.headers));
   }
 
   const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, reqTag, log };

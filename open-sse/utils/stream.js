@@ -50,7 +50,8 @@ export function createSSEStream(options = {}) {
     body = null,
     onStreamComplete = null,
     apiKey = null,
-    credentials = null
+    credentials = null,
+    rawPassthrough = false
   } = options;
 
   let buffer = "";
@@ -116,6 +117,23 @@ export function createSSEStream(options = {}) {
     transform(chunk, controller) {
       if (!ttftAt) ttftAt = Date.now();
       const text = decoder.decode(chunk, { stream: true });
+      if (rawPassthrough) {
+        reqLogger?.appendProviderChunk?.(text);
+        reqLogger?.appendConvertedChunk?.(text);
+        buffer += text;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          try {
+            const parsed = JSON.parse(line.slice(5).trim());
+            const extracted = extractUsage(parsed);
+            if (extracted) usage = mergeUsage(usage, extracted);
+          } catch { /* SSE comments and sentinels carry no usage */ }
+        }
+        controller.enqueue(chunk);
+        return;
+      }
       buffer += text;
       reqLogger?.appendProviderChunk?.(text);
 
@@ -381,6 +399,11 @@ export function createSSEStream(options = {}) {
     },
 
     flush(controller) {
+      if (rawPassthrough) {
+        trackPendingRequest(model, provider, connectionId, false);
+        finalizeStream();
+        return;
+      }
       const evtSummary = Object.entries(eventTypeCounts).map(([k, v]) => `${k}=${v}`).join(",") || "none";
       dbg("SSE", `flush | provider=${provider} | model=${model} | recvLines=${sseLineCount} | emitted=${sseEmittedCount} | events=[${evtSummary}]`);
       trackPendingRequest(model, provider, connectionId, false);
@@ -512,7 +535,7 @@ export function createSSETransformStreamWithLogger(targetFormat, sourceFormat, p
   });
 }
 
-export function createPassthroughStreamWithLogger(provider = null, reqLogger = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null) {
+export function createPassthroughStreamWithLogger(provider = null, reqLogger = null, model = null, connectionId = null, body = null, onStreamComplete = null, apiKey = null, rawPassthrough = false) {
   return createSSEStream({
     mode: STREAM_MODE.PASSTHROUGH,
     provider,
@@ -521,6 +544,7 @@ export function createPassthroughStreamWithLogger(provider = null, reqLogger = n
     connectionId,
     body,
     onStreamComplete,
-    apiKey
+    apiKey,
+    rawPassthrough
   });
 }

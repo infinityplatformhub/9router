@@ -127,6 +127,67 @@ describe("DefaultExecutor.buildHeaders() — claude provider", () => {
     );
     expect(headers["x-claude-code-session-id"]).toBeUndefined();
   });
+
+  it("forwards Claude Code capability headers unchanged to Anthropic", () => {
+    const executor = new DefaultExecutor("anthropic");
+    const beta = "claude-code-20250219,auto-mode-future-beta";
+    const headers = executor.buildHeaders({
+      apiKey: "sk-test",
+      rawHeaders: { "anthropic-beta": beta, "anthropic-version": "2023-06-01" },
+    }, true, "https://api.anthropic.com/v1/messages", "claude-sonnet-5", { safeguards: { test: true } });
+
+    expect(headers["anthropic-beta"]).toBe(beta);
+    expect(headers["anthropic-version"]).toBe("2023-06-01");
+    expect(Object.keys(headers).filter(key => key.toLowerCase() === "anthropic-beta")).toHaveLength(1);
+  });
+
+  it("forwards Claude Code beta flags to Claude-compatible upstreams", () => {
+    const executor = new DefaultExecutor("anthropic-compatible-custom");
+    const headers = executor.buildHeaders({
+      apiKey: "key",
+      rawHeaders: { "anthropic-beta": "auto-mode-future-beta" },
+      providerSpecificData: { baseUrl: "https://proxy.example.com/v1" },
+    }, true, "https://proxy.example.com/v1/messages", "claude-sonnet-5");
+
+    expect(headers["Anthropic-Beta"]).toContain("auto-mode-future-beta");
+  });
+
+  it("does not rewrite a safeguard-bearing request body", () => {
+    const executor = new DefaultExecutor("anthropic");
+    const body = {
+      safeguards: { requests: [{ tool_use_id: "toolu_original" }] },
+      messages: [{ role: "assistant", content: [{ type: "tool_use", id: "toolu_original", name: "Bash", input: {} }] }],
+    };
+    expect(executor.transformRequest("claude-sonnet-5", body)).toBe(body);
+    expect(body.safeguards.requests[0].tool_use_id).toBe("toolu_original");
+  });
+});
+
+describe("Claude safeguard response passthrough", () => {
+  it("keeps safeguard results and tool-use IDs in streamed events", async () => {
+    const { createPassthroughStreamWithLogger } = await import("open-sse/utils/stream.js");
+    const stream = createPassthroughStreamWithLogger("anthropic", null, null, null, null, null, null, true);
+    const input = 'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_original","name":"Bash","input":{}},"safeguard_results":{"toolu_original":{"decision":"allow"}}}\n\n';
+    const output = await new Response(new Blob([input]).stream().pipeThrough(stream)).text();
+    expect(output).toBe(input);
+  });
+});
+
+describe("Anthropic response headers", () => {
+  it("forwards retry and rate-limit headers without forwarding unrelated metadata", async () => {
+    const { upstreamResponseHeaders } = await import("open-sse/utils/upstreamHeaders.js");
+    const upstream = new Headers({
+      "retry-after": "12",
+      "x-should-retry": "false",
+      "anthropic-ratelimit-unified-requests-remaining": "42",
+      "set-cookie": "private=1",
+    });
+    const headers = new Headers(upstreamResponseHeaders(upstream));
+    expect(headers.get("retry-after")).toBe("12");
+    expect(headers.get("x-should-retry")).toBe("false");
+    expect(headers.get("anthropic-ratelimit-unified-requests-remaining")).toBe("42");
+    expect(headers.has("set-cookie")).toBe(false);
+      });
 });
 
 // ─── anthropic-compatible header stripping ────────────────────────────────────
