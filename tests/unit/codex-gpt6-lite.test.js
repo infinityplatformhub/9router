@@ -10,7 +10,7 @@ const credentials = { connectionId: "fixture", accessToken: "fixture-token" };
 afterEach(() => vi.restoreAllMocks());
 
 describe("Codex GPT-6 Sol/Luna transport", () => {
-  it.each(["gpt-6-sol", "gpt-6-luna"])("lists %s with Codex capabilities", (model) => {
+  it.each(["gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna"])("lists %s with Codex capabilities", (model) => {
     const entry = getModelsByProviderId("codex").find((item) => item.id === model);
     expect(entry?.responsesLite).toBe(true);
     expect(entry?.thinkingLevels).toEqual(["low", "medium", "high", "xhigh", "max"]);
@@ -69,13 +69,13 @@ describe("Codex GPT-6 Sol/Luna transport", () => {
     expect(body.reasoning.context).toBe("all_turns");
   });
 
-  it("sends the Lite shape and header in the actual outbound request", async () => {
+  it.each(["gpt-6.1-sol", "gpt-6-luna"])("sends %s with the Lite shape and header in the actual outbound request", async (model) => {
     const fetchMock = vi.spyOn(proxyFetchModule, "proxyAwareFetch").mockResolvedValue({
       ok: true, status: 200, headers: new Map(),
     });
     await new CodexExecutor().execute({
-      model: "gpt-6-luna",
-      body: { model: "gpt-6-luna", input: "hello", instructions: "Do the task" },
+      model,
+      body: { model, input: "hello", instructions: "Do the task" },
       stream: true,
       credentials,
     });
@@ -85,7 +85,7 @@ describe("Codex GPT-6 Sol/Luna transport", () => {
     expect(url).toBe("https://chatgpt.com/backend-api/codex/responses");
     expect(options.headers["x-openai-internal-codex-responses-lite"]).toBe("true");
     expect(options.headers.version).toBe("0.155.0");
-    expect(body.model).toBe("gpt-6-luna");
+    expect(body.model).toBe(model);
     expect(body.instructions).toBe("");
     expect(body.input[0].type).toBe("additional_tools");
     expect(body.reasoning.context).toBe("all_turns");
