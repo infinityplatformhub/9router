@@ -9,7 +9,7 @@ import { normalizeResponsesInput } from "../translator/formats/responsesApi.js";
 import { fetchImageAsBase64 } from "../translator/concerns/image.js";
 import { getModelUpstreamId, getProviderModels } from "../config/providerModels.js";
 import { getThinkingLevels } from "../providers/thinkingLevels.js";
-import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, resolveRetryEntry } from "../config/runtimeConfig.js";
+import { DEFAULT_RETRY_CONFIG, HTTP_STATUS, resolveRetryEntry, CODEX_SSE_PEEK_TIMEOUT_MS } from "../config/runtimeConfig.js";
 import { dbg } from "../utils/debugLog.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { stripCodexUnsupportedPatterns } from "../utils/codexToolSchema.js";
@@ -335,9 +335,18 @@ export class CodexExecutor extends BaseExecutor {
     let text = "";
     let matched = null;
     let accountFallback = false;
+    let pendingRead = null;
+    let peekTimer;
+    const deadline = new Promise(resolve => {
+      peekTimer = setTimeout(() => resolve(null), CODEX_SSE_PEEK_TIMEOUT_MS);
+    });
     try {
       while (text.length < CODEX_SSE_PEEK_BYTES) {
-        const { done, value } = await reader.read();
+        pendingRead = reader.read();
+        const next = await Promise.race([pendingRead, deadline]);
+        if (next === null) break;
+        pendingRead = null;
+        const { done, value } = next;
         if (done) break;
         chunks.push(value);
         text += decoder.decode(value, { stream: true });
@@ -350,6 +359,8 @@ export class CodexExecutor extends BaseExecutor {
       }
     } catch (e) {
       dbg("CODEX", `peek read error: ${e.message}`);
+    } finally {
+      clearTimeout(peekTimer);
     }
 
     if (matched) {
@@ -358,25 +369,22 @@ export class CodexExecutor extends BaseExecutor {
       return { matched, message: extractSseErrorMessage(text, matched), accountFallback, replacementBody: null };
     }
 
-    reader.releaseLock();
-
-    // Re-assemble stream: prefix chunks + remaining upstream body
-    const upstream = response.body;
-    let upstreamReader = null;
+    // Keep the reader and any pending read: releasing its lock on timeout would
+    // reject that read and lose the next upstream chunk.
     const replacementBody = new ReadableStream({
       start(controller) {
         for (const c of chunks) controller.enqueue(c);
-        upstreamReader = upstream.getReader();
       },
       async pull(controller) {
         try {
-          const { done, value } = await upstreamReader.read();
-          if (done) { controller.close(); return; }
+          const { done, value } = await (pendingRead || reader.read());
+          pendingRead = null;
+          if (done) { reader.releaseLock(); controller.close(); return; }
           controller.enqueue(value);
-        } catch (e) { controller.error(e); }
+        } catch (e) { try { reader.releaseLock(); } catch { /* already released */ } controller.error(e); }
       },
       cancel(reason) {
-        try { upstreamReader?.cancel(reason); } catch { /* noop */ }
+        return reader.cancel(reason).finally(() => { try { reader.releaseLock(); } catch { /* already released */ } });
       },
     });
     return { matched: null, message: null, accountFallback: false, replacementBody };
